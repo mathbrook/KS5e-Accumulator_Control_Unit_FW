@@ -2,12 +2,13 @@
 #include <FlexCAN_T4.h>
 #include <Metro.h>
 #include <LTC2499.h>
-//#define runningFoReal
+#include <WireIMXRT.h>
+#define runningFoReal
 #ifdef runningFoReal
 //Init ADCs
 Ltc2499 theThings[16];
 int8_t batteryTempvoltages[96];
-uint8_t ltcAddressList[6]={0x14,0x15,0x16,
+uint8_t ltcAddressList[6]={ADDR_ZZZ,0x15,0x16,
                            0x17,0x24,0x25}; //first 6 configurable addresses in the mf datasheet
 elapsedMillis conversionTime;//wait 80ms for conversion to be ready
 #endif
@@ -31,6 +32,7 @@ void canSniff(const CAN_message_t &msg);
 void getTempData();
 void sendTempData();
 void setup() {
+  Wire.setClock(100000);
    Wire.begin();
   Serial.begin(115200); delay(400);
   Serial.println("Battery temp array: ");
@@ -45,7 +47,8 @@ void setup() {
    for(int i=0;i<6;i++){
     byte ltcStatus=theThings[i].begin(ltcAddressList[i]);
     if(ltcStatus){
-      Serial.printf("Error with LTC # %d\n",i);
+      Serial.print(ltcAddressList[i]);
+      Serial.printf(", Error with LTC # %d\n",i);
     }
     else{
       Serial.printf("initialized LTC #%d with address %x\n",i,ltcAddressList[i]);
