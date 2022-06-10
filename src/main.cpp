@@ -3,24 +3,30 @@
 #include <Metro.h>
 #include <LTC2499.h>
 #include <WireIMXRT.h>
+#include <FreqMeasureMulti.h>
 enum ACUSTATE {BOOTUP, RUNNING, FAULT};
 int acuState=0;
 #define runningFoReal
 #ifdef runningFoReal
 #define NUMBER_OF_LTCs 6
+#define NUMBER_OF_CELLS 72
 uint8_t gettingTempState=0; //0=set 1=wait 2=get
 //Init ADCs
-Ltc2499 theThings[16];
-int8_t batteryTempvoltages[96];
-uint8_t ltcAddressList[]={ADDR_00Z,ADDR_ZZZ,ADDR_0ZZ,
-                           ADDR_ZZ0,ADDR_Z0Z,ADDR_Z00}; //first 6 configurable addresses in the mf datasheet
+Ltc2499 theThings[6];
+float batteryTempvoltages[NUMBER_OF_CELLS];
+uint8_t ltcAddressList[]={ADDR_0Z0,ADDR_ZZZ,ADDR_0ZZ,
+                           ADDR_ZZ0,ADDR_Z0Z,ADDR_Z00,ADDR_00Z}; //first 6 configurable addresses in the mf datasheet
 byte ADCChannels[]={CHAN_SINGLE_0P,CHAN_SINGLE_1P,CHAN_SINGLE_2P,CHAN_SINGLE_3P,
                     CHAN_SINGLE_4P,CHAN_SINGLE_5P,CHAN_SINGLE_6P,CHAN_SINGLE_7P,
                     CHAN_SINGLE_8P,CHAN_SINGLE_9P,CHAN_SINGLE_10P,CHAN_SINGLE_11P};
 elapsedMillis conversionTime;//wait 80ms for conversion to be ready
 #endif
 FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> Can0;
-int8_t batteryTemps[96];
+int8_t batteryTemps[NUMBER_OF_CELLS];
+FreqMeasureMulti imdPWM; float sum1=0;int count1=0;
+FreqMeasureMulti imdPWM2; float sum2=0;int count2=0;
+int currentChannel=0;
+int globalHighTherm=25, globalLowTherm=25;
 //Can IDs
 #define BMS_ID 0x7E3
 #define ThermistorToBMS_ID 0x9839F380 
@@ -34,6 +40,7 @@ byte getHighestTemp[] = {0x03,0x22,0xF0,0x29,0x55,0x55,0x55,0x55}; //lowest temp
 Metro sendTempRate=Metro(100);
 Metro getTempRate=Metro(500);
 Metro doThingsRate=Metro(100);
+Metro IMDPwmPrintTimer=Metro(500);
 #define DEBUG
 //printing received to serial
 void canSniff(const CAN_message_t &msg);
@@ -41,13 +48,15 @@ void getTempData();
 void sendTempData();
 void ACUStateMachine();
 int setChannels(int channelNo);
+void setChannelsSwitchCase(int channelNo);
 void getTemps(int channelNo);
+void getImdPwm();
 void setup() {
   Wire.setClock(100000);
    Wire.begin();
   Serial.begin(115200); delay(400);
   Serial.println("Battery temp array: ");
-  for(int i=0; i<=95;i++){
+  for(int i=0; i<NUMBER_OF_CELLS;i++){
     Serial.print("Cell number: ");
     Serial.print(i);
     Serial.print(" Value: ");
@@ -55,25 +64,25 @@ void setup() {
     batteryTemps[i]=25; //init default temps as a safe value
     Serial.println(batteryTemps[i]);
   }
-  pinMode(9, OUTPUT); digitalWrite(9, HIGH); //tranceiver enable pin, connect to MCP2562 standby pin
+  pinMode(9, OUTPUT); digitalWrite(9, HIGH); //Relay pin
   // pinMode(LED_BUILTIN,OUTPUT);
   for(int i=0;i<4;i++){
-    pinMode(i, OUTPUT); digitalWrite(i, LOW);
+    pinMode(i, OUTPUT); digitalWrite(i, LOW); //indicator LEDs
   }
   // #ifdef runningFoReal
-  //  for(int i=0;i<NUMBER_OF_LTCs;i++){
-  //   byte ltcStatus=theThings[i].begin(ltcAddressList[i]);
-  //   if(ltcStatus){
-  //     Serial.print(ltcAddressList[i]);
-  //     Serial.printf(", Error with LTC # %d",i);
-  //     Serial.println();
-  //     digitalWrite(0,HIGH);
-  //     // while(1){};
-  //   }
-  //   else{
-  //     Serial.printf("initialized LTC #%d with address %x\n",i,ltcAddressList[i]);
-  //   }
-  // }
+   for(int i=0;i<NUMBER_OF_LTCs;i++){
+    byte ltcStatus=theThings[i].begin(ltcAddressList[i],5000);
+    if(ltcStatus){
+      Serial.print(ltcAddressList[i]);
+      Serial.printf(", Error with LTC # %d",i);
+      Serial.println();
+      digitalWrite(0,HIGH);
+      // while(1){};
+    }
+    else{
+      Serial.printf("initialized LTC #%d with address %x\n",i,ltcAddressList[i]);
+    }
+  }
   // #endif
   
   Can0.begin();
@@ -87,20 +96,24 @@ void setup() {
   Can0.mailboxStatus();
   // Serial.println("Send something on serial to continue...");
   // while(!Serial.available());{ }
+  imdPWM.begin(8,FREQMEASUREMULTI_MARK_ONLY);
 }
 #ifdef runningFoReal
+
 void getAllTheTemps(int channelNo){
   for(int i=0;i<NUMBER_OF_LTCs;i++){
-    theThings[i].changeChannel(ADCChannels[channelNo]);
+    theThings[i].changeChannel(CHAN_SINGLE_0P);
   }
   conversionTime=0;
-  while(conversionTime<80){}
+  delay(100);
   for(int i=0;i<NUMBER_OF_LTCs;i++){
     float voltageX=theThings[i].readVoltage();
-    batteryTempvoltages[(i*16)+channelNo]=voltageX;
+    Serial.println(voltageX);
+    int readingNumber=(i*12)+channelNo;
+    batteryTempvoltages[readingNumber]=voltageX;
     #ifdef DEBUG
       char buffer[50];
-      sprintf(buffer,"LTC Number: %d  Channel: %d Voltage: %f",i,channelNo,voltageX);
+      sprintf(buffer,"LTC Number: %d  Channel: %d Voltage: %f Reading Number: %d",i,channelNo,voltageX, readingNumber);
       Serial.println(buffer);
     #endif
   }
@@ -108,67 +121,80 @@ void getAllTheTemps(int channelNo){
 }
 #endif
 void loop() {
+  getImdPwm();
   digitalWrite(LED_BUILTIN,LOW);
   Can0.events();
   if(doThingsRate.check()){
-    ACUStateMachine();
+      ACUStateMachine();
+
   }
-  // if(sendTempRate.check()==1){
-  //   digitalWrite(LED_BUILTIN,HIGH);
-  //   sendTempData();
-  //   //while(1){}
+  if(sendTempRate.check()==1){
+    digitalWrite(2,HIGH);
+    sendTempData();
+    //while(1){}
+    digitalWrite(2,LOW);
+  }
+  // if(globalHighTherm>=60){
+  //   digitalWrite(9,LOW);
+  // }else if(globalHighTherm<=55){
+  //   digitalWrite(9,HIGH);
   // }
+  if(globalHighTherm>=32){
+    digitalWrite(9,LOW);
+  }else if(globalHighTherm<=31){
+    digitalWrite(9,HIGH);
+  }
   // if(getTempRate.check()){
   //   digitalWrite(LED_BUILTIN,HIGH);
   //   getTempData();
   // }
   // #ifdef runningFoReal
-  //   getAllTheTemps(0);
-  //   digitalWrite(LED_BUILTIN,HIGH);
-  //   getAllTheTemps(1);
-  //   digitalWrite(LED_BUILTIN,LOW);
-  //   getAllTheTemps(2);
-  //   digitalWrite(LED_BUILTIN,HIGH);
-  //   getAllTheTemps(3);
-  //   digitalWrite(LED_BUILTIN,LOW);
-  //   getAllTheTemps(4);
-  //   digitalWrite(LED_BUILTIN,HIGH);
-  //   getAllTheTemps(5);
-  //   digitalWrite(LED_BUILTIN,LOW);
-  //   getAllTheTemps(6);
-  //   digitalWrite(LED_BUILTIN,HIGH);
-  //   getAllTheTemps(7);
-  //   digitalWrite(LED_BUILTIN,LOW);
-  //   getAllTheTemps(8);
-  //   digitalWrite(LED_BUILTIN,HIGH);
-  //   getAllTheTemps(9);
-  //   digitalWrite(LED_BUILTIN,LOW);
-  //   getAllTheTemps(10);
-  //   digitalWrite(LED_BUILTIN,HIGH);
-  //   getAllTheTemps(11);
-  //   digitalWrite(LED_BUILTIN,LOW);
-  //   getAllTheTemps(12);
-  //   digitalWrite(LED_BUILTIN,HIGH);
-  //   getAllTheTemps(13);
-  //   digitalWrite(LED_BUILTIN,LOW);
-  //   getAllTheTemps(14);
-  //   digitalWrite(LED_BUILTIN,HIGH);
-  //   getAllTheTemps(15);
+    // getAllTheTemps(0);
+    // digitalWrite(LED_BUILTIN,HIGH);
+    // getAllTheTemps(1);
+    // digitalWrite(LED_BUILTIN,LOW);
+    // getAllTheTemps(2);
+    // digitalWrite(LED_BUILTIN,HIGH);
+    // getAllTheTemps(3);
+    // digitalWrite(LED_BUILTIN,LOW);
+    // getAllTheTemps(4);
+    // digitalWrite(LED_BUILTIN,HIGH);
+    // getAllTheTemps(5);
+    // digitalWrite(LED_BUILTIN,LOW);
+    // getAllTheTemps(6);
+    // digitalWrite(LED_BUILTIN,HIGH);
+    // getAllTheTemps(7);
+    // digitalWrite(LED_BUILTIN,LOW);
+    // getAllTheTemps(8);
+    // digitalWrite(LED_BUILTIN,HIGH);
+    // getAllTheTemps(9);
+    // digitalWrite(LED_BUILTIN,LOW);
+    // getAllTheTemps(10);
+    // digitalWrite(LED_BUILTIN,HIGH);
+    // getAllTheTemps(11);
+    // digitalWrite(LED_BUILTIN,LOW);
+    // getAllTheTemps(12);
+    // digitalWrite(LED_BUILTIN,HIGH);
+    // getAllTheTemps(13);
+    // digitalWrite(LED_BUILTIN,LOW);
+    // getAllTheTemps(14);
+    // digitalWrite(LED_BUILTIN,HIGH);
+    // getAllTheTemps(15);
   // #endif
 }
 void canSniff(const CAN_message_t &msg) {
   //if(msg.id==BMS_Response_ID){
-  digitalWrite(LED_BUILTIN,HIGH);
-  Serial.print("MB "); Serial.print(msg.mb);
-  Serial.print("  OVERRUN: "); Serial.print(msg.flags.overrun);
-  Serial.print("  LEN: "); Serial.print(msg.len);
-  Serial.print(" EXT: "); Serial.print(msg.flags.extended);
-  Serial.print(" TS: "); Serial.print(msg.timestamp);
-  Serial.print(" ID: "); Serial.print(msg.id, HEX);
-  Serial.print(" Buffer: ");
-  for ( uint8_t i = 0; i < msg.len; i++ ) {
-    Serial.print(msg.buf[i], HEX); Serial.print(" ");
-  } Serial.println();
+  // digitalWrite(LED_BUILTIN,HIGH);
+  // Serial.print("MB "); Serial.print(msg.mb);
+  // Serial.print("  OVERRUN: "); Serial.print(msg.flags.overrun);
+  // Serial.print("  LEN: "); Serial.print(msg.len);
+  // Serial.print(" EXT: "); Serial.print(msg.flags.extended);
+  // Serial.print(" TS: "); Serial.print(msg.timestamp);
+  // Serial.print(" ID: "); Serial.print(msg.id, HEX);
+  // Serial.print(" Buffer: ");
+  // for ( uint8_t i = 0; i < msg.len; i++ ) {
+  //   Serial.print(msg.buf[i], HEX); Serial.print(" ");
+  // } Serial.println();
   //}
 }
 //getting one of the max temps from BMS (high or low not sure lol)
@@ -191,14 +217,14 @@ void sendTempData(){
   sendTempMsg.flags.extended=1;//extended id
   sendTempMsg.len = 8;//per protocol
   sendTempMsg.id = ThermistorToBMS_ID; //Temp broadcast ID
-  enabledTherm=95;//number of cells 0 based
+  enabledTherm=NUMBER_OF_CELLS-1;//number of cells 0 based
   int lowTherm=0, lowestThermId=0, highTherm=0, highestThermId=0;
-  for (int i=0;i<=95;i++){ //get lowest and highest
+  for (int i=0;i<NUMBER_OF_CELLS;i++){ //get lowest and highest
   #ifdef DEBUG
-   Serial.print("Cell number: ");
-    Serial.print(i);
-    Serial.print(" Value: ");
-    Serial.println(batteryTemps[i]);
+  //  Serial.print("Cell number: ");
+  //   Serial.print(i);
+  //   Serial.print(" Value: ");
+  //   Serial.println(batteryTemps[i]);
   #endif
     if(batteryTemps[i]<lowTherm){
       lowTherm=batteryTemps[i];
@@ -208,102 +234,176 @@ void sendTempData(){
       highTherm=batteryTemps[i];
       highestThermId=i;
     }
-    #ifdef DEBUG
-    Serial.printf("Iter: %d Highest: %d Lowest: %d\n",i,highTherm,lowTherm);
-    #endif
+    // #ifdef DEBUG
+    // Serial.printf("Iter: %d Highest: %d Lowest: %d\n",i,highTherm,lowTherm);
+    // #endif
   }
+  if(lowTherm<-40){
+    lowTherm=-40;
+  }
+  if(highTherm>80){
+    highTherm=80;
+  }
+  //Serial.printf("Highest: %d Lowest: %d\n",highTherm,lowTherm);
   int avgTherm=(lowTherm+highTherm)/2;//yep
   int checksum=moduleNo+lowTherm+highTherm+avgTherm+enabledTherm+highestThermId+lowestThermId+57+8;//0x39 and 0x08 added to checksum per orion protocol
   byte tempdata[]={moduleNo,lowTherm,highTherm,avgTherm,enabledTherm,highestThermId,lowestThermId,checksum};
   memcpy(sendTempMsg.buf, tempdata, sizeof(sendTempMsg.buf));
-  // Can0.write(sendTempMsg);
-  // #ifdef DEBUG
-  //  Serial.print("  LEN: "); Serial.print(sendTempMsg.len);
-  //   Serial.print(" EXT: "); Serial.print(sendTempMsg.flags.extended);
-  //   Serial.print(" TS: "); Serial.print(sendTempMsg.timestamp);
-  //   Serial.print(" ID: "); Serial.print(sendTempMsg.id, HEX);
-  //   Serial.print(" Buffer: ");
-  //   for ( uint8_t i = 0; i < sendTempMsg.len; i++ ) {
-  //     Serial.print(sendTempMsg.buf[i], HEX); Serial.print(" ");
-  //   } 
-  // Serial.println();
-  // //Serial.println("Sending Temp Data...");
-  // #endif
+  Can0.write(sendTempMsg);
+  //GLobal ints for tracking
+  globalHighTherm=highTherm;
+  globalLowTherm=lowTherm;
 }
-void ACUStateMachine(){
-  switch(acuState){
-    case 0:
-      bool initOk=true;
-      for(int i=0;i<NUMBER_OF_LTCs;i++){
-        byte ltcStatus=theThings[i].begin(ltcAddressList[i]);
-        if(ltcStatus){
-          Serial.print(ltcAddressList[i]);
-          Serial.printf(", Error with LTC # %d\n",i);
-          initOk=false;
-        }
-        else{
-          Serial.printf("initialized LTC #%d with address %x\n",i,ltcAddressList[i]);
-        }
-      }
-      if(initOk==true){
-        acuState=1;
-      }else if(initOk==false){acuState=2;}    
-    break;
-    case 1:
-      switch(gettingTempState){
-        case 0:
-          setChannels(0);
-          conversionTime=0;
-          gettingTempState=1;
-          break;
-        case 1:
-          if(conversionTime>=80){
-            gettingTempState=2;
-          }
-          break;
-        case 2:
-          getTemps(0);
-          gettingTempState=0;
-      }
-    break;
-    case 2:
-    delay(200);
-    acuState=0;
-    break;
-  }
-}
+
 int setChannels(int channelNo){
   for(int i=0;i<NUMBER_OF_LTCs;i++){
     theThings[i].changeChannel(ADCChannels[channelNo]);
     return channelNo;
   }
 } 
+void setChannelsSwitchCase(int channelNo){
+  switch(channelNo){
+    case 0:{
+      for(int i=0;i<NUMBER_OF_LTCs;i++){
+      theThings[i].changeChannel(CHAN_SINGLE_0P);
+      }
+    }
+    break;
+      case 1:{
+      for(int i=0;i<NUMBER_OF_LTCs;i++){
+      theThings[i].changeChannel(CHAN_SINGLE_1P);
+      break;
+      }
+      }
+      break;
+      case 2:{
+      for(int i=0;i<NUMBER_OF_LTCs;i++){
+      theThings[i].changeChannel(CHAN_SINGLE_2P);
+      break;
+      }
+      }
+      break;
+      case 3:{
+      for(int i=0;i<NUMBER_OF_LTCs;i++){
+      theThings[i].changeChannel(CHAN_SINGLE_3P);
+      }
+      }
+      break;
+      case 4:{
+      for(int i=0;i<NUMBER_OF_LTCs;i++){
+      theThings[i].changeChannel(CHAN_SINGLE_4P);
+      }
+      }
+      break;
+      case 5:{
+      for(int i=0;i<NUMBER_OF_LTCs;i++){
+      theThings[i].changeChannel(CHAN_SINGLE_5P);
+      }
+      }
+      break;
+      case 6:{
+      for(int i=0;i<NUMBER_OF_LTCs;i++){
+      theThings[i].changeChannel(CHAN_SINGLE_6P);
+      break;
+      }
+      }
+      break;
+      case 7:{
+      for(int i=0;i<NUMBER_OF_LTCs;i++){
+      theThings[i].changeChannel(CHAN_SINGLE_7P);
+      }
+      }
+      break;
+      case 8:{
+      for(int i=0;i<NUMBER_OF_LTCs;i++){
+      theThings[i].changeChannel(CHAN_SINGLE_8P);
+      }
+      }
+      break;
+      case 9:{
+      for(int i=0;i<NUMBER_OF_LTCs;i++){
+      theThings[i].changeChannel(CHAN_SINGLE_9P);
+      }
+      }
+      break;
+      case 10:{
+      for(int i=0;i<NUMBER_OF_LTCs;i++){
+      theThings[i].changeChannel(CHAN_SINGLE_10P);
+      }
+      }
+      break;
+      case 11:{
+      for(int i=0;i<NUMBER_OF_LTCs;i++){
+      theThings[i].changeChannel(CHAN_SINGLE_11P);
+      }
+      }
+      break;
+  }
+} 
 void getTemps(int channelNo){
   for(int i=0;i<NUMBER_OF_LTCs;i++){
     float v=theThings[i].readVoltage();
-    int cellNum=(i*16)+channelNo;
+    int cellNum=(i*12)+channelNo;
     batteryTempvoltages[cellNum]=v;
+    float temp=(v*-79.256)+168.4;
+    batteryTemps[cellNum]=temp;
     #ifdef DEBUG
-      char buffer[50];
-      sprintf(buffer,"LTC Number: %d  Channel: %d Voltage: %d",i,channelNo,batteryTempvoltages[cellNum]);
-      Serial.println(buffer);
+      // char buffer[50];
+      // sprintf(buffer,"LTC Number: %d CellNum: %d Channel: %d Reading: %f TempC: %f ",i,cellNum,channelNo,v,temp);
+      // Serial.println(buffer);
     #endif
   }
 }
-void actuallyGetAllTemps(){
-  switch(gettingTempState){
-        case 0:
-          setChannels(0);
-          conversionTime=0;
-          gettingTempState=1;
-          break;
-        case 1:
-          if(conversionTime>=80){
-            gettingTempState=2;
-          }
-          break;
-        case 2:
-          getTemps(0);
-          gettingTempState=0;
+void ACUStateMachine(){
+  // Serial.println("State:");
+  // Serial.println(acuState);
+  switch(acuState){
+    case 0:
+    {
+      setChannelsSwitchCase(currentChannel);
+      conversionTime=0;
+      acuState=1;
+      Serial.print("Setting Channels: ");
+      break;
+    }
+    case 1:
+      if(conversionTime>=500){
+        acuState=2;
+        Serial.println("Going to get readings");
+        }
+      break;
+    case 2:
+      Serial.println("reading channels");
+      getTemps(currentChannel);
+      acuState=0;
+      currentChannel++;
+      if(currentChannel>11){
+      currentChannel=0;
       }
-}
+      break;
+    }
+  }
+  void DebuggingPrintout(){
+    for(int i=0;i<NUMBER_OF_CELLS;i++){
+      Serial.print("Cell Number: "); Serial.print(i+1); Serial.print(" Temp: "); Serial.print(batteryTemps[i]);
+    }
+  }
+  void getImdPwm(){
+    float imdasdf=imdPWM.read();
+    if (imdPWM.available()) {
+    sum1 = sum1 + imdPWM.read();
+    count1++;
+    }
+    if(IMDPwmPrintTimer.check()){
+        if (count1 > 0) {
+          float imdPWMfrequency=(imdPWM.countToFrequency(sum1 /count1)/2);
+        Serial.print("FREQUENCY: ");Serial.println(imdPWM.countToFrequency(sum1 /count1)/2);
+        float period=1/imdPWMfrequency; 
+        Serial.print("PW: ");Serial.println(imdPWM.countToNanoseconds(imdasdf)/2000000000.0);
+      } else {
+        Serial.print("(no pulses)");
+      }
+      
+      sum1=0;count1=0;
+    }
+  }
