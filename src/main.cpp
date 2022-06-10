@@ -399,7 +399,7 @@ void ACUStateMachine(){
           float imdPWMfrequency=(imdPWM.countToFrequency(sum1 /count1)/2);
         Serial.print("FREQUENCY: ");Serial.println(imdPWM.countToFrequency(sum1 /count1)/2);
         float period=1/imdPWMfrequency; 
-        Serial.print("PW: ");Serial.println(imdPWM.countToNanoseconds(imdasdf)/2000000000.0);
+        Serial.print("PW: ");Serial.println((imdPWM.countToNanoseconds(sum1/count1)/1000000.0)/(period*10));
       } else {
         Serial.print("(no pulses)");
       }
