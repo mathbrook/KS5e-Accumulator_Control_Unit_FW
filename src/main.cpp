@@ -14,8 +14,8 @@ uint8_t gettingTempState=0; //0=set 1=wait 2=get
 //Init ADCs
 Ltc2499 theThings[6];
 float batteryTempvoltages[NUMBER_OF_CELLS];
-uint8_t ltcAddressList[]={ADDR_0Z0,ADDR_ZZZ,ADDR_0ZZ,
-                           ADDR_ZZ0,ADDR_Z0Z,ADDR_Z00,ADDR_00Z}; //first 6 configurable addresses in the mf datasheet
+uint8_t ltcAddressList[]={ADDR_Z00,ADDR_0ZZ,ADDR_0Z0, //one two three
+                           ADDR_ZZZ,ADDR_Z0Z,ADDR_ZZ0,ADDR_00Z}; //first 6 configurable addresses in the mf datasheet
 byte ADCChannels[]={CHAN_SINGLE_0P,CHAN_SINGLE_1P,CHAN_SINGLE_2P,CHAN_SINGLE_3P,
                     CHAN_SINGLE_4P,CHAN_SINGLE_5P,CHAN_SINGLE_6P,CHAN_SINGLE_7P,
                     CHAN_SINGLE_8P,CHAN_SINGLE_9P,CHAN_SINGLE_10P,CHAN_SINGLE_11P};
@@ -51,6 +51,7 @@ int setChannels(int channelNo);
 void setChannelsSwitchCase(int channelNo);
 void getTemps(int channelNo);
 void getImdPwm();
+void DebuggingPrintout();
 void setup() {
   Wire.setClock(100000);
    Wire.begin();
@@ -61,7 +62,7 @@ void setup() {
     Serial.print(i);
     Serial.print(" Value: ");
     // batteryTemps[i]=random(-40,80);
-    batteryTemps[i]=25; //init default temps as a safe value
+    batteryTemps[i]=0; //init default temps as a safe value
     Serial.println(batteryTemps[i]);
   }
   pinMode(9, OUTPUT); digitalWrite(9, HIGH); //Relay pin
@@ -133,6 +134,7 @@ void loop() {
     sendTempData();
     //while(1){}
     digitalWrite(2,LOW);
+    DebuggingPrintout();
   }
   // if(globalHighTherm>=60){
   //   digitalWrite(9,LOW);
@@ -218,7 +220,7 @@ void sendTempData(){
   sendTempMsg.len = 8;//per protocol
   sendTempMsg.id = ThermistorToBMS_ID; //Temp broadcast ID
   enabledTherm=NUMBER_OF_CELLS-1;//number of cells 0 based
-  int lowTherm=0, lowestThermId=0, highTherm=0, highestThermId=0;
+  int lowTherm=batteryTemps[0], lowestThermId, highTherm=batteryTemps[0], highestThermId;
   for (int i=0;i<NUMBER_OF_CELLS;i++){ //get lowest and highest
   #ifdef DEBUG
   //  Serial.print("Cell number: ");
@@ -244,7 +246,7 @@ void sendTempData(){
   if(highTherm>80){
     highTherm=80;
   }
-  //Serial.printf("Highest: %d Lowest: %d\n",highTherm,lowTherm);
+  Serial.printf("Highest: %d Lowest: %d\n",highTherm,lowTherm);
   int avgTherm=(lowTherm+highTherm)/2;//yep
   int checksum=moduleNo+lowTherm+highTherm+avgTherm+enabledTherm+highestThermId+lowestThermId+57+8;//0x39 and 0x08 added to checksum per orion protocol
   byte tempdata[]={moduleNo,lowTherm,highTherm,avgTherm,enabledTherm,highestThermId,lowestThermId,checksum};
@@ -348,9 +350,9 @@ void getTemps(int channelNo){
     float temp=(v*-79.256)+168.4;
     batteryTemps[cellNum]=temp;
     #ifdef DEBUG
-      // char buffer[50];
-      // sprintf(buffer,"LTC Number: %d CellNum: %d Channel: %d Reading: %f TempC: %f ",i,cellNum,channelNo,v,temp);
-      // Serial.println(buffer);
+      char buffer[100];
+      sprintf(buffer,"LTC Number: %d CellNum: %d Channel: %d Reading: %f TempC: %f ",i,cellNum,channelNo,v,temp);
+      Serial.println(buffer);
     #endif
   }
 }
@@ -367,7 +369,7 @@ void ACUStateMachine(){
       break;
     }
     case 1:
-      if(conversionTime>=500){
+      if(conversionTime>=100){
         acuState=2;
         Serial.println("Going to get readings");
         }
@@ -386,6 +388,7 @@ void ACUStateMachine(){
   void DebuggingPrintout(){
     for(int i=0;i<NUMBER_OF_CELLS;i++){
       Serial.print("Cell Number: "); Serial.print(i+1); Serial.print(" Temp: "); Serial.print(batteryTemps[i]);
+      Serial.println();
     }
   }
   void getImdPwm(){
