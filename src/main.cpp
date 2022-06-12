@@ -8,14 +8,14 @@ enum ACUSTATE {BOOTUP, RUNNING, FAULT};
 int acuState=0;
 #define runningFoReal
 #ifdef runningFoReal
-#define NUMBER_OF_LTCs 6
-#define NUMBER_OF_CELLS 72
+#define NUMBER_OF_LTCs 5
+#define NUMBER_OF_CELLS 60
 uint8_t gettingTempState=0; //0=set 1=wait 2=get
 //Init ADCs
 Ltc2499 theThings[6];
 float batteryTempvoltages[NUMBER_OF_CELLS];
-uint8_t ltcAddressList[]={ADDR_Z00,ADDR_0ZZ,ADDR_0Z0, //one two three
-                           ADDR_ZZZ,ADDR_Z0Z,ADDR_ZZ0,ADDR_00Z}; //first 6 configurable addresses in the mf datasheet
+uint8_t ltcAddressList[]={ADDR_Z00,ADDR_Z0Z,ADDR_0Z0, //one two three
+                           ADDR_ZZ0,ADDR_0ZZ}; //first 6 configurable addresses in the mf datasheet
 byte ADCChannels[]={CHAN_SINGLE_0P,CHAN_SINGLE_1P,CHAN_SINGLE_2P,CHAN_SINGLE_3P,
                     CHAN_SINGLE_4P,CHAN_SINGLE_5P,CHAN_SINGLE_6P,CHAN_SINGLE_7P,
                     CHAN_SINGLE_8P,CHAN_SINGLE_9P,CHAN_SINGLE_10P,CHAN_SINGLE_11P};
@@ -41,6 +41,7 @@ Metro sendTempRate=Metro(100);
 Metro getTempRate=Metro(500);
 Metro doThingsRate=Metro(100);
 Metro IMDPwmPrintTimer=Metro(500);
+Metro fanSpeedMsgTimer=Metro(1000);
 #define DEBUG
 //printing received to serial
 void canSniff(const CAN_message_t &msg);
@@ -52,6 +53,7 @@ void setChannelsSwitchCase(int channelNo);
 void getTemps(int channelNo);
 void getImdPwm();
 void DebuggingPrintout();
+void controlFanSpeed();
 void setup() {
   Wire.setClock(100000);
    Wire.begin();
@@ -82,7 +84,7 @@ void setup() {
     }
     else{
       Serial.printf("initialized LTC #%d with address %x\n",i,ltcAddressList[i]);
-    }
+    } delay(100);
   }
   // #endif
   
@@ -127,62 +129,20 @@ void loop() {
   Can0.events();
   if(doThingsRate.check()){
       ACUStateMachine();
-
   }
   if(sendTempRate.check()==1){
     digitalWrite(2,HIGH);
     sendTempData();
     //while(1){}
     digitalWrite(2,LOW);
-    DebuggingPrintout();
+    //DebuggingPrintout();
   }
-  // if(globalHighTherm>=60){
-  //   digitalWrite(9,LOW);
-  // }else if(globalHighTherm<=55){
-  //   digitalWrite(9,HIGH);
-  // }
-  if(globalHighTherm>=32){
+  if(globalHighTherm>=60){
     digitalWrite(9,LOW);
-  }else if(globalHighTherm<=31){
+  }else if(globalHighTherm<=59){
     digitalWrite(9,HIGH);
+    controlFanSpeed();
   }
-  // if(getTempRate.check()){
-  //   digitalWrite(LED_BUILTIN,HIGH);
-  //   getTempData();
-  // }
-  // #ifdef runningFoReal
-    // getAllTheTemps(0);
-    // digitalWrite(LED_BUILTIN,HIGH);
-    // getAllTheTemps(1);
-    // digitalWrite(LED_BUILTIN,LOW);
-    // getAllTheTemps(2);
-    // digitalWrite(LED_BUILTIN,HIGH);
-    // getAllTheTemps(3);
-    // digitalWrite(LED_BUILTIN,LOW);
-    // getAllTheTemps(4);
-    // digitalWrite(LED_BUILTIN,HIGH);
-    // getAllTheTemps(5);
-    // digitalWrite(LED_BUILTIN,LOW);
-    // getAllTheTemps(6);
-    // digitalWrite(LED_BUILTIN,HIGH);
-    // getAllTheTemps(7);
-    // digitalWrite(LED_BUILTIN,LOW);
-    // getAllTheTemps(8);
-    // digitalWrite(LED_BUILTIN,HIGH);
-    // getAllTheTemps(9);
-    // digitalWrite(LED_BUILTIN,LOW);
-    // getAllTheTemps(10);
-    // digitalWrite(LED_BUILTIN,HIGH);
-    // getAllTheTemps(11);
-    // digitalWrite(LED_BUILTIN,LOW);
-    // getAllTheTemps(12);
-    // digitalWrite(LED_BUILTIN,HIGH);
-    // getAllTheTemps(13);
-    // digitalWrite(LED_BUILTIN,LOW);
-    // getAllTheTemps(14);
-    // digitalWrite(LED_BUILTIN,HIGH);
-    // getAllTheTemps(15);
-  // #endif
 }
 void canSniff(const CAN_message_t &msg) {
   //if(msg.id==BMS_Response_ID){
@@ -408,5 +368,21 @@ void ACUStateMachine(){
       }
       
       sum1=0;count1=0;
+    }
+  }
+  void controlFanSpeed(){
+    if(fanSpeedMsgTimer.check()){
+    uint8_t fanSpeed=64;
+    if(globalHighTherm>=25){
+        fanSpeed=map(globalHighTherm,25,40,128,255);
+    }
+    Serial.print("Fan Speed: ");
+    Serial.println(fanSpeed);
+    CAN_message_t ctrlMsg;
+      ctrlMsg.len=8;
+      ctrlMsg.id=0xC5;
+      uint8_t fanSpeedMsg[]={fanSpeed,0,0,0,1,1,0,0};
+      memcpy(ctrlMsg.buf, fanSpeedMsg, sizeof(ctrlMsg.buf));
+      Can0.write(ctrlMsg);
     }
   }
