@@ -200,11 +200,11 @@ void sendTempData(){
     // Serial.printf("Iter: %d Highest: %d Lowest: %d\n",i,highTherm,lowTherm);
     // #endif
   }
-  if(lowTherm<-40){
-    lowTherm=-40;
-  }
   if(highTherm>80){
-    highTherm=80;
+    highTherm=25;
+  }
+  if(lowTherm<-40){
+    lowTherm=(highTherm-2);
   }
   Serial.printf("Highest: %d Lowest: %d\n",highTherm,lowTherm);
   int avgTherm=(lowTherm+highTherm)/2;//yep
@@ -303,10 +303,18 @@ void setChannelsSwitchCase(int channelNo){
   }
 } 
 void getTemps(int channelNo){
+  CAN_message_t energus_voltages;
+  energus_voltages.id = 0x6B3;
+  energus_voltages.buf[0]=channelNo;
+  energus_voltages.len=8;
   for(int i=0;i<NUMBER_OF_LTCs;i++){
+
     float v=theThings[i].readVoltage();
     int cellNum=(i*12)+channelNo;
     batteryTempvoltages[cellNum]=v;
+    float vv = v*100;
+    energus_voltages.buf[i+1]=(int)vv;
+    Serial.printf("Can Message Test: %d\n",energus_voltages.buf[i+1]);
     float temp=(v*-79.256)+168.4;
     batteryTemps[cellNum]=temp;
     #ifdef DEBUG
@@ -315,6 +323,7 @@ void getTemps(int channelNo){
       Serial.println(buffer);
     #endif
   }
+  Can0.write(energus_voltages);
 }
 void ACUStateMachine(){
   // Serial.println("State:");
@@ -325,7 +334,7 @@ void ACUStateMachine(){
       setChannelsSwitchCase(currentChannel);
       conversionTime=0;
       acuState=1;
-      Serial.print("Setting Channels: ");
+      Serial.println("Setting Channels: ");
       break;
     }
     case 1:
@@ -340,7 +349,7 @@ void ACUStateMachine(){
       acuState=0;
       currentChannel++;
       if(currentChannel>11){
-      currentChannel=0;
+        currentChannel=0;
       }
       break;
     }
@@ -374,13 +383,14 @@ void ACUStateMachine(){
     if(fanSpeedMsgTimer.check()){
     uint8_t fanSpeed=64;
     if(globalHighTherm>=25){
-        fanSpeed=map(globalHighTherm,25,40,128,255);
+ //       fanSpeed=map(globalHighTherm,25,30,128,255);
+        fanSpeed=255;
     }
     Serial.print("Fan Speed: ");
     Serial.println(fanSpeed);
     CAN_message_t ctrlMsg;
       ctrlMsg.len=8;
-      ctrlMsg.id=0xC5;
+      ctrlMsg.id=0xC7;
       uint8_t fanSpeedMsg[]={fanSpeed,0,0,0,1,1,0,0};
       memcpy(ctrlMsg.buf, fanSpeedMsg, sizeof(ctrlMsg.buf));
       Can0.write(ctrlMsg);
